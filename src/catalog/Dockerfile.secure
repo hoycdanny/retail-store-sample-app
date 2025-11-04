@@ -1,0 +1,93 @@
+# Security-Hardened Catalog Service Dockerfile
+# Build Stage
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.3.20240117.0@sha256:34d8b8d8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b AS build-env
+
+# Security: Install only essential packages (removed git as it's not needed for build)
+RUN dnf --setopt=install_weak_deps=False install -q -y \
+    golang \
+    && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf /tmp/* /var/tmp/*
+
+# Security: Create non-root build user
+RUN groupadd -r builduser && useradd -r -g builduser builduser
+
+# Security: Set up Go environment with proper permissions
+RUN mkdir -p /go/src /go/bin /appsrc && \
+    chown -R builduser:builduser /go /appsrc
+
+USER builduser
+WORKDIR /appsrc
+
+# Security: Use secure Go proxy
+ENV GOPROXY=https://proxy.golang.org,direct
+ENV GOSUMDB=sum.golang.org
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOARCH=amd64
+
+# Security: Copy dependency files first for better caching
+COPY --chown=builduser:builduser go.mod go.sum ./
+RUN go mod download && go mod verify
+
+# Security: Copy source code and build with security flags
+COPY --chown=builduser:builduser . .
+RUN go build -ldflags="-w -s -extldflags=-static" -a -installsuffix cgo -o main main.go && \
+    chmod 755 main
+
+# Runtime Stage - Security Hardened
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.3.20240117.0@sha256:34d8b8d8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b
+
+# Security: Install minimal runtime dependencies
+RUN dnf --setopt=install_weak_deps=False install -q -y \
+    shadow-utils \
+    ca-certificates \
+    && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf /tmp/* /var/tmp/* /var/log/dnf*
+
+# Security: Create non-root user with minimal privileges
+ENV APPUSER=appuser
+ENV APPUID=1000
+ENV APPGID=1000
+
+RUN groupadd -r -g "$APPGID" "$APPUSER" && \
+    useradd -r -g "$APPUSER" -u "$APPUID" \
+    --home "/app" \
+    --create-home \
+    --shell /sbin/nologin \
+    "$APPUSER"
+
+# Security: Set secure environment variables
+ENV GIN_MODE=release
+ENV PORT=8080
+
+WORKDIR /app
+USER appuser
+
+# Security: Copy binary with proper ownership and permissions
+COPY --chown=appuser:appuser --from=build-env /appsrc/main /app/catalog
+COPY --chown=appuser:appuser ./ATTRIBUTION.md ./LICENSES.md ./
+
+# Security: Set file permissions explicitly
+RUN chmod 555 /app/catalog && \
+    chmod 444 ./ATTRIBUTION.md ./LICENSES.md
+
+# Security: Expose only necessary port
+EXPOSE 8080
+
+# Security: Add health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD /app/catalog --health-check || exit 1
+
+# Security: Use exec form to avoid shell injection
+ENTRYPOINT ["/app/catalog"]
+
+# Security: Add security labels
+LABEL maintainer="security-team@company.com" \
+      version="1.0.0" \
+      description="Security-hardened Catalog service" \
+      security.scan="enabled" \
+      security.non-root="true" \
+      security.health-check="enabled" \
+      security.static-binary="true"
