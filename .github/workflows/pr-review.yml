@@ -1,0 +1,81 @@
+name: Amazon Q PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  automated-review:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get changed files
+      id: changed-files
+      run: |
+        # 取得變更的檔案清單
+        git diff --name-only origin/${{ github.base_ref }}..HEAD > changed_files.txt
+        echo "Changed files:"
+        cat changed_files.txt
+    
+    - name: Request Amazon Q Review
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // 讀取變更的檔案
+          let changedFiles = '';
+          try {
+            changedFiles = fs.readFileSync('changed_files.txt', 'utf8').trim();
+          } catch (error) {
+            changedFiles = 'Unable to read changed files';
+          }
+          
+          const comment = `
+          ## 🤖 Amazon Q Developer Review Request
+          
+          @amazon-q-developer Please review this pull request and provide feedback on:
+          
+          ### Code Quality
+          - Code structure and organization
+          - Best practices adherence
+          - Performance considerations
+          - Error handling
+          
+          ### Security
+          - Security vulnerabilities
+          - Input validation
+          - Authentication/authorization
+          - Secrets management
+          
+          ### Architecture
+          - Design patterns
+          - Microservices best practices
+          - Cloud-native considerations
+          - Scalability implications
+          
+          ### Changed Files:
+          \`\`\`
+          ${changedFiles}
+          \`\`\`
+          
+          ### Specific Areas of Focus:
+          - Dockerfile security improvements
+          - Kubernetes manifest configurations
+          - Application code quality
+          - CI/CD pipeline enhancements
+          
+          Please provide specific, actionable recommendations for improvement.
+          `;
+          
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
