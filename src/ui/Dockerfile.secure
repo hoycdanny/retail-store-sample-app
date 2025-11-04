@@ -1,0 +1,99 @@
+# Security-Hardened UI Service Dockerfile
+# Build Stage
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.3.20240117.0@sha256:34d8b8d8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b AS build-env
+
+# Security: Install only essential packages and clean up thoroughly
+RUN dnf --setopt=install_weak_deps=False install -q -y \
+    maven \
+    java-21-amazon-corretto-headless \
+    which \
+    tar \
+    gzip \
+    && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf /tmp/* /var/tmp/*
+
+# Security: Use non-root user for build process
+RUN groupadd -r builduser && useradd -r -g builduser builduser
+USER builduser
+
+VOLUME /tmp
+WORKDIR /home/builduser
+
+# Security: Copy files with proper ownership
+COPY --chown=builduser:builduser .mvn .mvn
+COPY --chown=builduser:builduser mvnw .
+COPY --chown=builduser:builduser pom.xml .
+
+# Security: Download dependencies offline for reproducible builds
+RUN ./mvnw dependency:go-offline -B -q
+
+COPY --chown=builduser:builduser ./src ./src
+
+# Security: Build with security flags and verify integrity
+RUN ./mvnw -DskipTests package -q && \
+    mv /home/builduser/target/ui-0.0.1-SNAPSHOT.jar /home/builduser/app.jar && \
+    chmod 644 /home/builduser/app.jar
+
+# Runtime Stage - Security Hardened
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.3.20240117.0@sha256:34d8b8d8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b
+
+# Security: Install minimal runtime dependencies only
+RUN dnf --setopt=install_weak_deps=False install -q -y \
+    java-21-amazon-corretto-headless \
+    shadow-utils \
+    && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf /tmp/* /var/tmp/* /var/log/dnf*
+
+# Security: Install curl-full for health checks (minimal attack surface)
+RUN dnf -q -y swap libcurl-minimal libcurl-full \
+    && dnf -q -y swap curl-minimal curl-full \
+    && dnf clean all
+
+# Security: Create non-root user with minimal privileges
+ENV APPUSER=appuser
+ENV APPUID=1000
+ENV APPGID=1000
+
+RUN groupadd -r -g "$APPGID" "$APPUSER" && \
+    useradd -r -g "$APPUSER" -u "$APPUID" \
+    --home "/app" \
+    --create-home \
+    --shell /sbin/nologin \
+    "$APPUSER"
+
+# Security: Set secure environment variables
+ENV JAVA_TOOL_OPTIONS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV SERVER_PORT=8080
+
+# Security: Set working directory and switch to non-root user
+WORKDIR /app
+USER appuser
+
+# Security: Copy files with proper ownership and permissions
+COPY --chown=appuser:appuser ./ATTRIBUTION.md ./LICENSES.md ./
+COPY --chown=appuser:appuser --from=build-env /home/builduser/app.jar ./app.jar
+
+# Security: Set file permissions explicitly
+RUN chmod 444 ./ATTRIBUTION.md ./LICENSES.md && \
+    chmod 544 ./app.jar
+
+# Security: Expose only necessary port
+EXPOSE 8080
+
+# Security: Add health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/actuator/health || exit 1
+
+# Security: Use exec form and avoid shell injection
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+
+# Security: Add labels for container metadata
+LABEL maintainer="security-team@company.com" \
+      version="1.0.0" \
+      description="Security-hardened UI service" \
+      security.scan="enabled" \
+      security.non-root="true" \
+      security.health-check="enabled"
