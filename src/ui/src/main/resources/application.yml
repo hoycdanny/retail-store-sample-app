@@ -68,5 +68,21 @@ management:
     web:
       exposure:
         include: info,health,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      show-components: always
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+    group:
+      readiness:
+        include: readinessState,database,memory,toggle
+      liveness:
+        include: livenessState,toggle
 
 otel.sdk.disabled: true
